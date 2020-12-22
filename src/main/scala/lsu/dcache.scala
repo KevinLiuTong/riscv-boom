@@ -23,28 +23,28 @@ import boom.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, 
 
 class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
   val io = new Bundle {
-    val req = Flipped(Decoupled(new WritebackReq(edge.bundle)))
-    val meta_read = Decoupled(new L1MetaReadReq)
-    val resp = Output(Bool())
-    val idx = Output(Valid(UInt()))
-    val data_req = Decoupled(new L1DataReadReq)
-    val data_resp = Input(UInt(encRowBits.W))
-    val mem_grant = Input(Bool())
-    val release = Decoupled(new TLBundleC(edge.bundle))
-    val lsu_release = Decoupled(new TLBundleC(edge.bundle))
+    val req: DecoupledIO[WritebackReq] = Flipped(Decoupled(new WritebackReq(edge.bundle)))
+    val meta_read: DecoupledIO[L1MetaReadReq] = Decoupled(new L1MetaReadReq)
+    val resp: Bool = Output(Bool())
+    val idx: ValidIO[UInt] = Output(Valid(UInt()))
+    val data_req: DecoupledIO[L1DataReadReq] = Decoupled(new L1DataReadReq)
+    val data_resp: UInt = Input(UInt(encRowBits.W))
+    val mem_grant: Bool = Input(Bool())
+    val release: DecoupledIO[TLBundleC] = Decoupled(new TLBundleC(edge.bundle))
+    val lsu_release: DecoupledIO[TLBundleC] = Decoupled(new TLBundleC(edge.bundle))
   }
 
-  val req = Reg(new WritebackReq(edge.bundle))
+  val req: WritebackReq = Reg(new WritebackReq(edge.bundle))
   val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: Nil = Enum(5)
-  val state = RegInit(s_invalid)
-  val r1_data_req_fired = RegInit(false.B)
-  val r2_data_req_fired = RegInit(false.B)
-  val r1_data_req_cnt = Reg(UInt(log2Up(refillCycles+1).W))
-  val r2_data_req_cnt = Reg(UInt(log2Up(refillCycles+1).W))
-  val data_req_cnt = RegInit(0.U(log2Up(refillCycles+1).W))
+  val state: UInt = RegInit(s_invalid)
+  val r1_data_req_fired: Bool = RegInit(false.B)
+  val r2_data_req_fired: Bool = RegInit(false.B)
+  val r1_data_req_cnt: UInt = Reg(UInt(log2Up(refillCycles+1).W))
+  val r2_data_req_cnt: UInt = Reg(UInt(log2Up(refillCycles+1).W))
+  val data_req_cnt: UInt = RegInit(0.U(log2Up(refillCycles+1).W))
   val (_, last_beat, all_beats_done, beat_count) = edge.count(io.release)
-  val wb_buffer = Reg(Vec(refillCycles, UInt(encRowBits.W)))
-  val acked = RegInit(false.B)
+  val wb_buffer: Vec[UInt] = Reg(Vec(refillCycles, UInt(encRowBits.W)))
+  val acked: Bool = RegInit(false.B)
 
   io.idx.valid       := state =/= s_invalid
   io.idx.bits        := req.idx
@@ -59,24 +59,28 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   io.lsu_release.valid := false.B
 
 
-
-  val r_address = Cat(req.tag, req.idx) << blockOffBits
-  val id = cfg.nMSHRs
-  val probeResponse = edge.ProbeAck(
+  /** Cat tag and set together. */
+  val r_address: UInt = (Cat(req.tag, req.idx) << blockOffBits).asUInt()
+  val id: Int = cfg.nMSHRs
+  val probeResponse: TLBundleC = edge.ProbeAck(
                           fromSource = id.U,
                           toAddress = r_address,
                           lgSize = lgCacheBlockBytes.U,
                           reportPermissions = req.param,
                           data = wb_buffer(data_req_cnt))
 
-  val voluntaryRelease = edge.Release(
+  val voluntaryRelease: TLBundleC = edge.Release(
                           fromSource = id.U,
                           toAddress = r_address,
                           lgSize = lgCacheBlockBytes.U,
                           shrinkPermissions = req.param,
                           data = wb_buffer(data_req_cnt))._2
 
-
+  // For each releaseData(eviction)/probeAckData(probe):
+  // 1. Fetch data from cache.
+  // 2. Issue the TL message.
+  // 3.1 Wait for Ack fro releaseData.
+  // 3.2 No wait for probeAckData.
   when (state === s_invalid) {
     io.req.ready := true.B
     when (io.req.fire()) {
@@ -107,7 +111,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     }
     when (r2_data_req_fired) {
       wb_buffer(r2_data_req_cnt) := io.data_resp
-      when (r2_data_req_cnt === (refillCycles-1).U) {
+      when (r2_data_req_cnt === (refillCycles-1).U) {// The data are all read out.
         io.resp := true.B
         state := s_lsu_release
         data_req_cnt := 0.U
@@ -144,35 +148,36 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
 
 class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
   val io = new Bundle {
-    val req = Flipped(Decoupled(new TLBundleB(edge.bundle)))
-    val rep = Decoupled(new TLBundleC(edge.bundle))
-    val meta_read = Decoupled(new L1MetaReadReq)
-    val meta_write = Decoupled(new L1MetaWriteReq)
-    val wb_req = Decoupled(new WritebackReq(edge.bundle))
-    val way_en = Input(UInt(nWays.W))
-    val wb_rdy = Input(Bool()) // Is writeback unit currently busy? If so need to retry meta read when its done
-    val mshr_rdy = Input(Bool()) // Is MSHR ready for this request to proceed?
-    val mshr_wb_rdy = Output(Bool()) // Should we block MSHR writebacks while we finish our own?
-    val block_state = Input(new ClientMetadata())
-    val lsu_release = Decoupled(new TLBundleC(edge.bundle))
+    val req: DecoupledIO[TLBundleB] = Flipped(Decoupled(new TLBundleB(edge.bundle)))
+    val rep: DecoupledIO[TLBundleC] = Decoupled(new TLBundleC(edge.bundle))
+    val meta_read: DecoupledIO[L1MetaReadReq] = Decoupled(new L1MetaReadReq)
+    val meta_write: DecoupledIO[L1MetaWriteReq] = Decoupled(new L1MetaWriteReq)
+    val wb_req: DecoupledIO[WritebackReq] = Decoupled(new WritebackReq(edge.bundle))
+    val way_en: UInt = Input(UInt(nWays.W))
+    val wb_rdy: Bool = Input(Bool()) // Is writeback unit currently busy? If so need to retry meta read when its done
+    val mshr_rdy: Bool = Input(Bool()) // Is MSHR ready for this request to proceed?
+    val mshr_wb_rdy: Bool = Output(Bool()) // Should we block MSHR writebacks while we finish our own?
+    val block_state: ClientMetadata = Input(new ClientMetadata())
+    val lsu_release: DecoupledIO[TLBundleC] = Decoupled(new TLBundleC(edge.bundle))
 
-    val state = Output(Valid(UInt(coreMaxAddrBits.W)))
+    val state: ValidIO[UInt] = Output(Valid(UInt(coreMaxAddrBits.W)))
   }
 
-  val (s_invalid :: s_meta_read :: s_meta_resp :: s_mshr_req ::
+  val s_invalid :: s_meta_read :: s_meta_resp :: s_mshr_req ::
        s_mshr_resp :: s_lsu_release :: s_release :: s_writeback_req :: s_writeback_resp ::
-       s_meta_write :: s_meta_write_resp :: Nil) = Enum(11)
-  val state = RegInit(s_invalid)
+       s_meta_write :: s_meta_write_resp :: Nil = Enum(11)
+  val state: UInt = RegInit(s_invalid)
 
-  val req = Reg(new TLBundleB(edge.bundle))
-  val req_idx = req.address(idxMSB, idxLSB)
-  val req_tag = req.address >> untagBits
+  val req: TLBundleB = Reg(new TLBundleB(edge.bundle))
 
-  val way_en = Reg(UInt())
-  val tag_matches = way_en.orR
-  val old_coh = Reg(new ClientMetadata)
-  val miss_coh = ClientMetadata.onReset
-  val reply_coh = Mux(tag_matches, old_coh, miss_coh)
+  val req_idx: UInt = req.address(idxMSB, idxLSB)
+  val req_tag: UInt = (req.address >> untagBits).asUInt()
+
+  val way_en: UInt = Reg(UInt())
+  val tag_matches: Bool = way_en.orR()
+  val old_coh: ClientMetadata = Reg(new ClientMetadata)
+  val miss_coh: ClientMetadata = ClientMetadata.onReset
+  val reply_coh: ClientMetadata = Mux(tag_matches, old_coh, miss_coh)
   val (is_dirty, report_param, new_coh) = reply_coh.onProbe(req.param)
 
   io.state.valid := state =/= s_invalid
@@ -256,43 +261,43 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
 }
 
 class BoomL1MetaReadReq(implicit p: Parameters) extends BoomBundle()(p) {
-  val req = Vec(memWidth, new L1MetaReadReq)
+  val req: Vec[L1MetaReadReq] = Vec(memWidth, new L1MetaReadReq)
 }
 
 class BoomL1DataReadReq(implicit p: Parameters) extends BoomBundle()(p) {
-  val req = Vec(memWidth, new L1DataReadReq)
-  val valid = Vec(memWidth, Bool())
+  val req: Vec[L1DataReadReq] = Vec(memWidth, new L1DataReadReq)
+  val valid: Vec[Bool] = Vec(memWidth, Bool())
 }
 
 abstract class AbstractBoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
   val io = IO(new BoomBundle {
-    val read  = Input(Vec(memWidth, Valid(new L1DataReadReq)))
-    val write = Input(Valid(new L1DataWriteReq))
-    val resp  = Output(Vec(memWidth, Vec(nWays, Bits(encRowBits.W))))
-    val nacks = Output(Vec(memWidth, Bool()))
+    val read: Vec[ValidIO[L1DataReadReq]] = Input(Vec(memWidth, Valid(new L1DataReadReq)))
+    val write: ValidIO[L1DataWriteReq] = Input(Valid(new L1DataWriteReq))
+    val resp: Vec[Vec[UInt]] = Output(Vec(memWidth, Vec(nWays, Bits(encRowBits.W))))
+    val nacks: Vec[Bool] = Output(Vec(memWidth, Bool()))
   })
 
-  def pipeMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
+  def pipeMap[T <: Data](f: Int => T): Vec[T] = VecInit((0 until memWidth).map(f))
 
 }
 
 class BoomDuplicatedDataArray(implicit p: Parameters) extends AbstractBoomDataArray
 {
 
-  val waddr = io.write.bits.addr >> rowOffBits
+  val waddr: UInt = (io.write.bits.addr >> rowOffBits).asUInt()
   for (j <- 0 until memWidth) {
 
-    val raddr = io.read(j).bits.addr >> rowOffBits
+    val raddr: UInt = (io.read(j).bits.addr >> rowOffBits).asUInt()
     for (w <- 0 until nWays) {
       val (array, omSRAM) = DescribedSRAM(
-        name = s"array_${w}_${j}",
+        name = s"array_${w}_$j",
         desc = "Non-blocking DCache Data Array",
         size = nSets * refillCycles,
         data = Vec(rowWords, Bits(encDataBits.W))
       )
       when (io.write.bits.way_en(w) && io.write.valid) {
-        val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
-        array.write(waddr, data, io.write.bits.wmask.asBools)
+        val data: Vec[UInt] = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
+        array.write(waddr, data, io.write.bits.wmask.asBools())
       }
       io.resp(j)(w) := RegNext(array.read(raddr, io.read(j).bits.way_en(w) && io.read(j).valid).asUInt)
     }
@@ -302,64 +307,64 @@ class BoomDuplicatedDataArray(implicit p: Parameters) extends AbstractBoomDataAr
 
 class BoomBankedDataArray(implicit p: Parameters) extends AbstractBoomDataArray {
 
-  val nBanks   = boomParams.numDCacheBanks
-  val bankSize = nSets * refillCycles / nBanks
+  val nBanks: Int = boomParams.numDCacheBanks
+  val bankSize: Int = nSets * refillCycles / nBanks
   require (nBanks >= memWidth)
   require (bankSize > 0)
 
-  val bankBits    = log2Ceil(nBanks)
-  val bankOffBits = log2Ceil(rowWords) + log2Ceil(wordBytes)
-  val bidxBits    = log2Ceil(bankSize)
-  val bidxOffBits = bankOffBits + bankBits
+  val bankBits: Int = log2Ceil(nBanks)
+  val bankOffBits: Int = log2Ceil(rowWords) + log2Ceil(wordBytes)
+  val bidxBits: Int = log2Ceil(bankSize)
+  val bidxOffBits: Int = bankOffBits + bankBits
 
   //----------------------------------------------------------------------------------------------------
 
-  val s0_rbanks = if (nBanks > 1) VecInit(io.read.map(r => (r.bits.addr >> bankOffBits)(bankBits-1,0))) else VecInit(0.U)
-  val s0_wbank  = if (nBanks > 1) (io.write.bits.addr >> bankOffBits)(bankBits-1,0) else 0.U
-  val s0_ridxs  = VecInit(io.read.map(r => (r.bits.addr >> bidxOffBits)(bidxBits-1,0)))
-  val s0_widx   = (io.write.bits.addr >> bidxOffBits)(bidxBits-1,0)
+  val s0_rbanks: Vec[UInt] = if (nBanks > 1) VecInit(io.read.map(r => (r.bits.addr >> bankOffBits)(bankBits-1,0))) else VecInit(0.U)
+  val s0_wbank: UInt = if (nBanks > 1) (io.write.bits.addr >> bankOffBits)(bankBits-1,0) else 0.U
+  val s0_ridxs: Vec[UInt] = VecInit(io.read.map(r => (r.bits.addr >> bidxOffBits)(bidxBits-1,0)))
+  val s0_widx: UInt = (io.write.bits.addr >> bidxOffBits)(bidxBits-1,0)
 
-  val s0_read_valids    = VecInit(io.read.map(_.valid))
-  val s0_bank_conflicts = pipeMap(w => (0 until w).foldLeft(false.B)((c,i) => c || io.read(i).valid && s0_rbanks(i) === s0_rbanks(w)))
-  val s0_do_bank_read   = s0_read_valids zip s0_bank_conflicts map {case (v,c) => v && !c}
-  val s0_bank_read_gnts = Transpose(VecInit(s0_rbanks zip s0_do_bank_read map {case (b,d) => VecInit((UIntToOH(b) & Fill(nBanks,d)).asBools)}))
-  val s0_bank_write_gnt = (UIntToOH(s0_wbank) & Fill(nBanks, io.write.valid)).asBools
+  val s0_read_valids: Vec[Bool] = VecInit(io.read.map(_.valid))
+  val s0_bank_conflicts: Vec[Bool] = pipeMap(w => (0 until w).foldLeft(false.B)((c, i) => c || io.read(i).valid && s0_rbanks(i) === s0_rbanks(w)))
+  val s0_do_bank_read: IndexedSeq[Bool] = s0_read_valids zip s0_bank_conflicts map {case (v,c) => v && !c}
+  val s0_bank_read_gnts: Vec[Vec[Bool]] = Transpose(VecInit(s0_rbanks zip s0_do_bank_read map {case (b,d) => VecInit((UIntToOH(b) & Fill(nBanks, d)).asBools())}))
+  val s0_bank_write_gnt: Seq[Bool] = (UIntToOH(s0_wbank) & Fill(nBanks, io.write.valid)).asBools()
 
   //----------------------------------------------------------------------------------------------------
 
-  val s1_rbanks         = RegNext(s0_rbanks)
-  val s1_ridxs          = RegNext(s0_ridxs)
-  val s1_read_valids    = RegNext(s0_read_valids)
-  val s1_pipe_selection = pipeMap(i => VecInit(PriorityEncoderOH(pipeMap(j =>
+  val s1_rbanks: Vec[UInt] = RegNext(s0_rbanks)
+  val s1_ridxs: Vec[UInt] = RegNext(s0_ridxs)
+  val s1_read_valids: Vec[Bool] = RegNext(s0_read_valids)
+  val s1_pipe_selection: Vec[Vec[Bool]] = pipeMap(i => VecInit(PriorityEncoderOH(pipeMap(j =>
                             if (j < i) s1_read_valids(j) && s1_rbanks(j) === s1_rbanks(i)
                             else if (j == i) true.B else false.B))))
-  val s1_ridx_match     = pipeMap(i => pipeMap(j => if (j < i) s1_ridxs(j) === s1_ridxs(i)
+  val s1_ridx_match: Vec[Vec[Bool]] = pipeMap(i => pipeMap(j => if (j < i) s1_ridxs(j) === s1_ridxs(i)
                                                     else if (j == i) true.B else false.B))
-  val s1_nacks          = pipeMap(w => s1_read_valids(w) && (s1_pipe_selection(w).asUInt & ~s1_ridx_match(w).asUInt).orR)
-  val s1_bank_selection = pipeMap(w => Mux1H(s1_pipe_selection(w), s1_rbanks))
+  val s1_nacks: Vec[Bool] = pipeMap(w => s1_read_valids(w) && (s1_pipe_selection(w).asUInt & ~s1_ridx_match(w).asUInt).orR)
+  val s1_bank_selection: Vec[UInt] = pipeMap(w => Mux1H(s1_pipe_selection(w), s1_rbanks))
 
   //----------------------------------------------------------------------------------------------------
 
-  val s2_bank_selection = RegNext(s1_bank_selection)
-  val s2_nacks          = RegNext(s1_nacks)
+  val s2_bank_selection: Vec[UInt] = RegNext(s1_bank_selection)
+  val s2_nacks: Vec[Bool] = RegNext(s1_nacks)
 
   for (w <- 0 until nWays) {
-    val s2_bank_reads = Reg(Vec(nBanks, Bits(encRowBits.W)))
+    val s2_bank_reads: Vec[UInt] = Reg(Vec(nBanks, Bits(encRowBits.W)))
 
     for (b <- 0 until nBanks) {
       val (array, omSRAM) = DescribedSRAM(
-        name = s"array_${w}_${b}",
+        name = s"array_${w}_$b",
         desc = "Non-blocking DCache Data Array",
         size = bankSize,
         data = Vec(rowWords, Bits(encDataBits.W))
       )
-      val ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
-      val way_en = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
+      val ridx: UInt = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
+      val way_en: UInt = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
       s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
 
       when (io.write.bits.way_en(w) && s0_bank_write_gnt(b)) {
-        val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
-        array.write(s0_widx, data, io.write.bits.wmask.asBools)
+        val data: Vec[UInt] = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
+        array.write(s0_widx, data, io.write.bits.wmask.asBools())
       }
     }
 
@@ -381,39 +386,39 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
   private val tileParams = p(TileKey)
   protected val cfg = tileParams.dcache.get
 
-  protected def cacheClientParameters = cfg.scratch.map(x => Seq()).getOrElse(Seq(TLMasterParameters.v1(
+  protected def cacheClientParameters: Seq[TLClientParameters] = cfg.scratch.map(x => Seq()).getOrElse(Seq(TLMasterParameters.v1(
     name          = s"Core ${staticIdForMetadataUseOnly} DCache",
     sourceId      = IdRange(0, 1 max (cfg.nMSHRs + 1)),
     supportsProbe = TransferSizes(cfg.blockBytes, cfg.blockBytes))))
 
-  protected def mmioClientParameters = Seq(TLMasterParameters.v1(
+  protected def mmioClientParameters: Seq[TLClientParameters] = Seq(TLMasterParameters.v1(
     name          = s"Core ${staticIdForMetadataUseOnly} DCache MMIO",
     sourceId      = IdRange(cfg.nMSHRs + 1, cfg.nMSHRs + 1 + cfg.nMMIOs),
     requestFifo   = true))
 
-  val node = TLClientNode(Seq(TLMasterPortParameters.v1(
+  val node: TLClientNode = TLClientNode(Seq(TLMasterPortParameters.v1(
     cacheClientParameters ++ mmioClientParameters,
     minLatency = 1)))
 
 
   lazy val module = new BoomNonBlockingDCacheModule(this)
 
-  def flushOnFenceI = cfg.scratch.isEmpty && !node.edges.out(0).manager.managers.forall(m => !m.supportsAcquireT || !m.executable || m.regionType >= RegionType.TRACKED || m.regionType <= RegionType.IDEMPOTENT)
+  def flushOnFenceI: Boolean = cfg.scratch.isEmpty && !node.edges.out(0).manager.managers.forall(m => !m.supportsAcquireT || !m.executable || m.regionType >= RegionType.TRACKED || m.regionType <= RegionType.IDEMPOTENT)
 
   require(!tileParams.core.haveCFlush || cfg.scratch.isEmpty, "CFLUSH_D_L1 instruction requires a D$")
 }
 
 
 class BoomDCacheBundle(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p) {
-  val errors = new DCacheErrors
-  val lsu   = Flipped(new LSUDMemIO)
+  val errors: DCacheErrors = new DCacheErrors
+  val lsu: LSUDMemIO = Flipped(new LSUDMemIO)
 }
 
 class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModuleImp(outer)
   with HasL1HellaCacheParameters
   with HasBoomCoreParameters
 {
-  implicit val edge = outer.node.edges.out(0)
+  implicit val edge: TLEdgeOut = outer.node.edges.out(0)
   val (tl_out, _) = outer.node.out(0)
   val io = IO(new BoomDCacheBundle)
 
@@ -423,13 +428,13 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       s"IOMSHRs must be FIFO for all regions with effects, but HellaCache sees ${m.nodePath.map(_.name)}")
   }
 
-  def widthMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
+  def widthMap[T <: Data](f: Int => T): Vec[T] = VecInit((0 until memWidth).map(f))
 
   val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6)
 
-  val wb = Module(new BoomWritebackUnit)
-  val prober = Module(new BoomProbeUnit)
-  val mshrs = Module(new BoomMSHRFile)
+  val wb: BoomWritebackUnit = Module(new BoomWritebackUnit)
+  val prober: BoomProbeUnit = Module(new BoomProbeUnit)
+  val mshrs: BoomMSHRFile = Module(new BoomMSHRFile)
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brupdate       := io.lsu.brupdate
   mshrs.io.exception    := io.lsu.exception
@@ -437,11 +442,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
   // tags
-  def onReset = L1Metadata(0.U, ClientMetadata.onReset)
-  val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
-  val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
+  def onReset: L1Metadata = L1Metadata(0.U, ClientMetadata.onReset)
+  val meta: Seq[L1MetadataArray[L1Metadata]] = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
+  val metaWriteArb: Arbiter[L1MetaWriteReq] = Module(new Arbiter(new L1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
-  val metaReadArb = Module(new Arbiter(new BoomL1MetaReadReq, 6))
+  val metaReadArb: Arbiter[BoomL1MetaReadReq] = Module(new Arbiter(new BoomL1MetaReadReq, 6))
   // 0 goes to MSHR replays, 1 goes to prober, 2 goes to wb, 3 goes to MSHR meta read,
   // 4 goes to pipeline, 5 goes to prefetcher
 
@@ -456,10 +461,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   metaWriteArb.io.out.ready := meta.map(_.io.write.ready).reduce(_||_)
 
   // data
-  val data = Module(if (boomParams.numDCacheBanks == 1) new BoomDuplicatedDataArray else new BoomBankedDataArray)
-  val dataWriteArb = Module(new Arbiter(new L1DataWriteReq, 2))
+  val data: AbstractBoomDataArray = Module(if (boomParams.numDCacheBanks == 1) new BoomDuplicatedDataArray else new BoomBankedDataArray)
+  val dataWriteArb: Arbiter[L1DataWriteReq] = Module(new Arbiter(new L1DataWriteReq, 2))
   // 0 goes to pipeline, 1 goes to MSHR refills
-  val dataReadArb = Module(new Arbiter(new BoomL1DataReadReq, 3))
+  val dataReadArb: Arbiter[BoomL1DataReadReq] = Module(new Arbiter(new BoomL1DataReadReq, 3))
   // 0 goes to MSHR replays, 1 goes to wb, 2 goes to pipeline
   dataReadArb.io.in := DontCare
 
@@ -619,8 +624,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // tag check
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until nWays).map(f))
-  val s1_tag_eq_way = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> untagBits)).asUInt)
-  val s1_tag_match_way = widthMap(i =>
+  val s1_tag_eq_way: Vec[UInt] = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> untagBits)).asUInt)
+  val s1_tag_match_way: Vec[UInt] = widthMap(i =>
                          Mux(s1_type === t_replay, s1_replay_way_en,
                          Mux(s1_type === t_wb,     s1_wb_way_en,
                          Mux(s1_type === t_mshr_meta_read, s1_mshr_meta_read_way_en,
@@ -628,9 +633,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
 
-  val s2_req   = RegNext(s1_req)
-  val s2_type  = RegNext(s1_type)
-  val s2_valid = widthMap(w =>
+  val s2_req: Vec[BoomDCacheReq] = RegNext(s1_req)
+  val s2_type: UInt = RegNext(s1_type)
+  val s2_valid: Vec[Bool] = widthMap(w =>
                   RegNext(s1_valid(w) &&
                          !io.lsu.s1_kill(w) &&
                          !IsKilledByBranch(io.lsu.brupdate, s1_req(w).uop) &&

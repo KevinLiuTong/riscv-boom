@@ -13,15 +13,15 @@ package boom.util
 
 import chisel3._
 import chisel3.util._
-
 import freechips.rocketchip.rocket.Instructions._
 import freechips.rocketchip.rocket._
-import freechips.rocketchip.util.{Str}
-import freechips.rocketchip.config.{Parameters}
-import freechips.rocketchip.tile.{TileKey}
+import freechips.rocketchip.util.Str
+import freechips.rocketchip.config.Parameters
+import freechips.rocketchip.tile.TileKey
+import boom.common._
+import boom.exu.BrUpdateInfo
 
-import boom.common.{MicroOp}
-import boom.exu.{BrUpdateInfo}
+import scala.collection.immutable
 
 /**
  * Object to XOR fold a input register of fullLength into a compressedLength.
@@ -71,7 +71,7 @@ object GetNewUopAndBrMask
   def apply(uop: MicroOp, brupdate: BrUpdateInfo)
     (implicit p: Parameters): MicroOp = {
     val newuop = WireInit(uop)
-    newuop.br_mask := uop.br_mask & ~brupdate.b1.resolve_mask
+    newuop.br_mask := uop.br_mask & (~brupdate.b1.resolve_mask).asUInt()
     newuop
   }
 }
@@ -82,11 +82,11 @@ object GetNewUopAndBrMask
 object GetNewBrMask
 {
    def apply(brupdate: BrUpdateInfo, uop: MicroOp): UInt = {
-     return uop.br_mask & ~brupdate.b1.resolve_mask
+     uop.br_mask & (~brupdate.b1.resolve_mask).asUInt()
    }
 
    def apply(brupdate: BrUpdateInfo, br_mask: UInt): UInt = {
-     return br_mask & ~brupdate.b1.resolve_mask
+     br_mask & (~brupdate.b1.resolve_mask).asUInt()
    }
 }
 
@@ -97,12 +97,12 @@ object UpdateBrMask
     out.br_mask := GetNewBrMask(brupdate, uop)
     out
   }
-  def apply[T <: boom.common.HasBoomUOP](brupdate: BrUpdateInfo, bundle: T): T = {
-    val out = WireInit(bundle)
-    out.uop.br_mask := GetNewBrMask(brupdate, bundle.uop.br_mask)
-    out
-  }
-  def apply[T <: boom.common.HasBoomUOP](brupdate: BrUpdateInfo, bundle: Valid[T]): Valid[T] = {
+  //def apply[T <: HasBoomUOP](brupdate: BrUpdateInfo, bundle: T): T = {
+  //  val out = WireInit(bundle)
+  //  out.uop.br_mask := GetNewBrMask(brupdate, bundle.uop.br_mask)
+  //  out
+  //}
+  def apply[T <: boom.common.HasBoomUOP](brupdate: BrUpdateInfo, bundle: ValidIO[T]): ValidIO[T] = {
     val out = WireInit(bundle)
     out.bits.uop.br_mask := GetNewBrMask(brupdate, bundle.bits.uop.br_mask)
     out.valid := bundle.valid && !IsKilledByBranch(brupdate, bundle.bits.uop.br_mask)
@@ -123,7 +123,7 @@ object maskMatch
  */
 object clearMaskBit
 {
-  def apply(msk: UInt, idx: UInt): UInt = (msk & ~(1.U << idx))(msk.getWidth-1, 0)
+  def apply(msk: UInt, idx: UInt): UInt = (msk & (~(1.U << idx)).asUInt())(msk.getWidth-1, 0)
 }
 
 /**
@@ -345,11 +345,11 @@ object DebugGetBJImm
 object AgePriorityEncoder
 {
   def apply(in: Seq[Bool], head: UInt): UInt = {
-    val n = in.size
-    val width = log2Ceil(in.size)
-    val n_padded = 1 << width
-    val temp_vec = (0 until n_padded).map(i => if (i < n) in(i) && i.U >= head else false.B) ++ in
-    val idx = PriorityEncoder(temp_vec)
+    val n: Int = in.size
+    val width: Int = log2Ceil(in.size)
+    val n_padded: Int = 1 << width
+    val temp_vec: Seq[Bool]  = (0 until n_padded).map(i => if (i < n) in(i) && i.U >= head else false.B) ++ in
+    val idx: UInt = PriorityEncoder(temp_vec)
     idx(width-1, 0) //discard msb
   }
 }
