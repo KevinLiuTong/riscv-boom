@@ -22,7 +22,7 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.util._
 import freechips.rocketchip.tile._
 
-import testchipip.{ExtendedTracedInstruction, WithExtendedTraceport}
+//import testchipip.{ExtendedTracedInstruction, WithExtendedTraceport}
 
 import boom.exu._
 import boom.ifu._
@@ -77,7 +77,7 @@ class BoomTile private(
   extends BaseTile(boomParams, crossing, lookup, q)
   with SinksExternalInterrupts
   with SourcesExternalNotifications
-  with WithExtendedTraceport
+  //with WithExtendedTraceport
 {
 
   // Private constructor ensures altered LazyModule.p is used implicitly
@@ -168,7 +168,7 @@ class BoomTileModuleImp(outer: BoomTile) extends BaseTileModuleImp(outer){
   outer.decodeCoreInterrupts(core.io.interrupts) // Decode the interrupt vector
 
   // Pass through various external constants and reports
-  outer.extTraceSourceNode.bundle <> core.io.trace
+  //outer.extTraceSourceNode.bundle <> core.io.trace
   outer.traceSourceNode.bundle <> DontCare
   outer.bpwatchSourceNode.bundle <> DontCare // core.io.bpwatch
   core.io.hartid := outer.hartIdSinkNode.bundle

@@ -39,7 +39,7 @@ import freechips.rocketchip.rocket.{Causes, PRV}
 import freechips.rocketchip.util.{Str, UIntIsOneOf, CoreMonitorBundle}
 import freechips.rocketchip.devices.tilelink.{PLICConsts, CLINTConsts}
 
-import testchipip.{ExtendedTracedInstruction}
+//import testchipip.{ExtendedTracedInstruction}
 
 import boom.common._
 import boom.ifu.{GlobalHistory, HasBoomFrontendParameters}
@@ -61,7 +61,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     val rocc = Flipped(new freechips.rocketchip.tile.RoCCCoreIO())
     val lsu = Flipped(new boom.lsu.LSUCoreIO)
     val ptw_tlb = new freechips.rocketchip.rocket.TLBPTWIO()
-    val trace = Output(Vec(coreParams.retireWidth, new ExtendedTracedInstruction))
+    //val trace = Output(Vec(coreParams.retireWidth, new ExtendedTracedInstruction))
     val fcsr_rm = UInt(freechips.rocketchip.tile.FPConstants.RM_SZ.W)
   }
   //**********************************
@@ -1422,56 +1422,5 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
         !dis_uops(w).exception
       )
     }
-  }
-
-  if (usingTrace) {
-    for (w <- 0 until coreWidth) {
-      // Delay the trace so we have a cycle to pull PCs out of the FTQ
-      io.trace(w).valid      := RegNext(rob.io.commit.arch_valids(w))
-
-      // Recalculate the PC
-      io.ifu.debug_ftq_idx(w) := rob.io.commit.uops(w).ftq_idx
-      val iaddr = (AlignPCToBoundary(io.ifu.debug_fetch_pc(w), icBlockBytes)
-                   + RegNext(rob.io.commit.uops(w).pc_lob)
-                   - Mux(RegNext(rob.io.commit.uops(w).edge_inst), 2.U, 0.U))(vaddrBits-1,0)
-      io.trace(w).iaddr      := Sext(iaddr, xLen)
-
-      def getInst(uop: MicroOp, inst: UInt): UInt = {
-        Mux(uop.is_rvc, Cat(0.U(16.W), inst(15,0)), inst)
-      }
-
-      def getWdata(uop: MicroOp, wdata: UInt): UInt = {
-        Mux((uop.dst_rtype === RT_FIX && uop.ldst =/= 0.U) || (uop.dst_rtype === RT_FLT), wdata, 0.U(xLen.W))
-      }
-
-      // use debug_insts instead of uop.debug_inst to use the rob's debug_inst_mem
-      // note: rob.debug_insts comes 1 cycle later
-      io.trace(w).insn       := getInst(RegNext(rob.io.commit.uops(w)), rob.io.commit.debug_insts(w))
-      io.trace(w).wdata.map { _ := RegNext(getWdata(rob.io.commit.uops(w), rob.io.commit.debug_wdata(w))) }
-
-      // Comment out this assert because it blows up FPGA synth-asserts
-      // This tests correctedness of the debug_inst mem
-      // when (RegNext(rob.io.commit.valids(w))) {
-      //   assert(rob.io.commit.debug_insts(w) === RegNext(rob.io.commit.uops(w).debug_inst))
-      // }
-      // This tests correctedness of recovering pcs through ftq debug ports
-      // when (RegNext(rob.io.commit.valids(w))) {
-      //   assert(Sext(io.trace(w).iaddr, xLen) ===
-      //     RegNext(Sext(rob.io.commit.uops(w).debug_pc(vaddrBits-1,0), xLen)))
-      // }
-
-      // These csr signals do not exactly match up with the ROB commit signals.
-      io.trace(w).priv       := RegNext(csr.io.status.prv)
-      // Can determine if it is an interrupt or not based on the MSB of the cause
-      io.trace(w).exception  := RegNext(rob.io.com_xcpt.valid && !rob.io.com_xcpt.bits.cause(xLen - 1))
-      io.trace(w).interrupt  := RegNext(rob.io.com_xcpt.valid && rob.io.com_xcpt.bits.cause(xLen - 1))
-      io.trace(w).cause      := RegNext(rob.io.com_xcpt.bits.cause)
-      io.trace(w).tval       := RegNext(csr.io.tval)
-    }
-    dontTouch(io.trace)
-  } else {
-    io.trace := DontCare
-    io.trace map (t => t.valid := false.B)
-    io.ifu.debug_ftq_idx := DontCare
   }
 }
